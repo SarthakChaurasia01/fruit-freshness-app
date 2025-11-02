@@ -5,6 +5,26 @@ from pathlib import Path
 import traceback
 import sys
 
+from torchvision import transforms
+from PIL import Image
+
+def preprocess_image(image):
+    """Preprocess the uploaded PIL image for model prediction."""
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),   # match ResNet input size
+        transforms.ToTensor(),
+        transforms.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225]
+        )
+    ])
+    
+    if isinstance(image, Image.Image):
+        img = transform(image).unsqueeze(0)  # add batch dimension
+        return img
+    else:
+        raise TypeError("Expected a PIL.Image object for preprocessing")
+
 LABELS_PATH = "labels.json"
 
 def build_model(num_classes=6):
