@@ -1,5 +1,5 @@
-gradio
-torch
-torchvision
-timm
-pillow
+streamlit>=1.20
+torch>=1.13
+torchvision>=0.14
+Pillow>=9.0
+numpy>=1.23
