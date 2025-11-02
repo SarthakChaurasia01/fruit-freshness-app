@@ -13,7 +13,9 @@ st.write("Upload an image of an apple / banana / orange and the model will predi
 
 # Load labels and model (cached)
 @st.cache_resource
-def load_resources(model_path="model.pth", device="cpu"):
+@st.cache_resource
+def load_resources(model_path="models/model.pth", device="cpu"):
+
     with open(LABELS_PATH, "r") as f:
         labels = json.load(f)
     model, device = load_model(model_path, device=device)
