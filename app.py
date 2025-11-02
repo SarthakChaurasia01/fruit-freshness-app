@@ -12,18 +12,19 @@ st.title("🍏 Fruit Freshness Detector")
 st.write("Upload an image of an apple / banana / orange and the model will predict whether it's fresh or rotten.")
 
 # Load labels and model (cached)
-@st.cache_resource
+# in app.py (replace existing function or update call)
 @st.cache_resource
 def load_resources(model_path="models/model.pth", device="cpu"):
-
+    import json
     with open(LABELS_PATH, "r") as f:
         labels = json.load(f)
     model, device = load_model(model_path, device=device)
     return model, device, labels
 
-# Try to use GPU if available (Streamlit Cloud usually provides CPU)
+# later when calling:
 device = "cuda" if torch.cuda.is_available() else "cpu"
-model, device, labels = load_resources(device=device)
+model, device, labels = load_resources(model_path="models/model.pth", device=device)
+
 
 st.sidebar.markdown("### Options")
 show_probs = st.sidebar.checkbox("Show probabilities", value=True)
