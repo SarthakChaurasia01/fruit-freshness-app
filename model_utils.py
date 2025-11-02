@@ -1,93 +1,92 @@
-"""
-Helpers for loading model and preprocessing images.
-
-IMPORTANT:
-If your saved checkpoint is a state_dict from a custom model (not ResNet18),
-edit build_model() to recreate your original architecture exactly and then
-load the state_dict into it.
-
-Expected model file: model.pth at repo root.
-"""
-
+# model_utils.py (diagnostic version)
 import torch
-import torchvision.transforms as T
 from torchvision import models
 from pathlib import Path
-import json
+import traceback
+import sys
 
-# labels file location
 LABELS_PATH = "labels.json"
 
 def build_model(num_classes=6):
-    """
-    Fallback model architecture used if loading a state_dict fails to directly
-    load a saved model object. This uses a ResNet18 backbone with a custom head.
-    If your model was different, replace this function accordingly.
-    """
-    # Create a ResNet18 and replace final fc to match num_classes
     model = models.resnet18(pretrained=False)
     in_features = model.fc.in_features
     model.fc = torch.nn.Linear(in_features, num_classes)
     return model
 
-def load_model(model_path="model.pth", device="cpu"):
-    """
-    Attempts to load a model saved in either form:
-     - torch.save(model)  ---> loads full object with torch.load
-     - torch.save(model.state_dict()) ---> loads state_dict into fallback model
-
-    Returns: model (on device), device
-    """
+def load_model(model_path="models/model.pth", device="cpu"):
     model_path = Path(model_path)
     if not model_path.exists():
-        raise FileNotFoundError(f"Model file not found at {model_path.resolve()} - please upload model.pth in repo root.")
+        raise FileNotFoundError(f"Model file not found at {model_path.resolve()} - please upload model.pth at this path.")
 
     device = torch.device(device)
+    last_exc = None
+
+    # Try loading with torch.load first
     try:
-        # Try to load full model object
         loaded = torch.load(str(model_path), map_location=device)
-        if isinstance(loaded, dict) and "state_dict" in loaded and len(loaded) == 1:
-            # Some frameworks wrap state_dict in dict
-            state = loaded["state_dict"]
-            model = build_model(num_classes=6)
-            model.load_state_dict(state)
-        elif isinstance(loaded, dict) and not any(hasattr(v, "__call__") for v in loaded.values()):
-            # Heuristic: it's a state_dict (mapping of tensors)
-            state = loaded
-            model = build_model(num_classes=6)
-            model.load_state_dict(state)
-        elif hasattr(loaded, "eval") and hasattr(loaded, "state_dict"):
-            # It's likely an actual nn.Module object
+        print("INFO: torch.load succeeded. Loaded type:", type(loaded))
+        # If it's an nn.Module instance
+        if hasattr(loaded, "eval") and hasattr(loaded, "state_dict"):
+            print("INFO: loaded object looks like an nn.Module. Using it directly.")
             model = loaded
-        else:
-            # Fallback: assume state_dict-like
-            try:
+            model.to(device)
+            model.eval()
+            return model, device
+
+        # If it's a dict / state_dict
+        if isinstance(loaded, dict):
+            print("INFO: loaded object is dict. Keys:", list(loaded.keys())[:50])
+            # common wrappers:
+            if "state_dict" in loaded:
+                state = loaded["state_dict"]
+                print("INFO: found 'state_dict' key. Using that as state dict.")
                 model = build_model(num_classes=6)
-                model.load_state_dict(loaded)
-            except Exception as e:
-                raise RuntimeError("Couldn't interpret the saved model file. If you saved only the state_dict with a custom model, modify build_model() to recreate that architecture and try again.") from e
-    except RuntimeError as e:
-        # Try loading as state_dict into known architecture
-        state = torch.load(str(model_path), map_location=device)
-        model = build_model(num_classes=6)
-        model.load_state_dict(state)
+                model.load_state_dict(state)
+                model.to(device)
+                model.eval()
+                return model, device
+
+            # lightning style often has "state_dict" or keys with "model." prefix
+            # Heuristic: check if values are tensors
+            sample_val = next(iter(loaded.values()))
+            if hasattr(sample_val, "shape"):
+                print("INFO: top-level dict appears to be a state_dict (tensor values). Loading into fallback model.")
+                model = build_model(num_classes=6)
+                try:
+                    model.load_state_dict(loaded)
+                except RuntimeError as e:
+                    print("WARNING: load_state_dict raised RuntimeError:", e)
+                    # Try removing possible 'model.' prefixes
+                    new_state = {}
+                    for k, v in loaded.items():
+                        new_key = k.replace("model.", "") if isinstance(k, str) else k
+                        new_state[new_key] = v
+                    try:
+                        model.load_state_dict(new_state)
+                    except Exception as e2:
+                        print("ERROR: still failed after stripping 'model.' prefixes:", e2)
+                        raise
+                model.to(device)
+                model.eval()
+                return model, device
+
+        # If we reach here, try torch.jit
+        last_exc = RuntimeError("Unable to interpret loaded object as module or state_dict.")
     except Exception as e:
-        # Final attempt: try torch.jit or other
-        try:
-            model = torch.jit.load(str(model_path), map_location=device)
-        except Exception as e2:
-            raise RuntimeError(f"Failed to load model.pth: {e}\nAlso failed to load with torch.jit: {e2}\nIf your model was saved as state_dict of a custom architecture, edit build_model() to match your model class.") from e2
+        last_exc = e
+        print("ERROR: torch.load failed or yielded unexpected object. Exception:")
+        traceback.print_exc(file=sys.stdout)
 
-    model.to(device)
-    model.eval()
-    return model, device
-
-# Preprocessing: adapt to model's expected size. Using common 224x224 + ImageNet norm.
-def preprocess_image(pil_image, size=224):
-    transforms = T.Compose([
-        T.Resize((size, size)),
-        T.ToTensor(),
-        T.Normalize(mean=[0.485, 0.456, 0.406],
-                    std=[0.229, 0.224, 0.225]),
-    ])
-    return transforms(pil_image)
+    # Try torch.jit.load
+    try:
+        print("INFO: Attempting torch.jit.load as fallback...")
+        model = torch.jit.load(str(model_path), map_location=device)
+        print("INFO: torch.jit.load succeeded. Type:", type(model))
+        model.to(device)
+        model.eval()
+        return model, device
+    except Exception as e2:
+        print("ERROR: torch.jit.load failed. Exception:")
+        traceback.print_exc(file=sys.stdout)
+        # raise a helpful error containing both exceptions
+        raise RuntimeError(f"Failed to load model.pth. torch.load error: {last_exc}\n torch.jit.load error: {e2}") from e2
