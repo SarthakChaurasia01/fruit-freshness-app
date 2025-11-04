@@ -1,99 +1,105 @@
+# app.py
 import streamlit as st
 from PIL import Image
 import io
 import torch
 import torch.nn.functional as F
-import json
-from model_utils import load_model, preprocess_image, LABELS_PATH
+from torchvision import transforms, models
+import torchvision.transforms.functional as TF
 
-st.set_page_config(page_title="Fruit Freshness Detector", page_icon="🍎")
+st.set_page_config(page_title="Fruit Freshness Classifier", layout="centered")
 
-st.title("🍏 Fruit Freshness Detector")
-st.write("Upload an image of an apple / banana / orange and the model will predict whether it's fresh or rotten.")
+# --- CLASSES / LABELS ---
+LABELS = {
+    0: "freshapples",
+    1: "freshbanana",
+    2: "freshoranges",
+    3: "rottenapples",
+    4: "rottenbanana",
+    5: "rottenoranges"
+}
 
-# Load labels and model (cached)
-# in app.py (replace existing function or update call)
-@st.cache_resource
-def load_resources(model_path="models/model.pth", device="cpu"):
-    import json
-    with open(LABELS_PATH, "r") as f:
-        labels = json.load(f)
-    model, device = load_model(model_path, device=device)
-    return model, device, labels
+MODEL_PATH = "model.pth"  # make sure this file is in the repo / same folder as app.py
 
-# later when calling:
-device = "cuda" if torch.cuda.is_available() else "cpu"
-model, device, labels = load_resources(model_path="models/model.pth", device=device)
+@st.cache_resource(show_spinner=False)
+def load_model(path: str):
+    """
+    Load a torch model saved with torch.save(model.state_dict(), path) or torch.save(model, path).
+    This function tries state_dict load first (recommended).
+    """
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Build a model architecture matching your training model.
+    # Below uses EfficientNet_B2 from torchvision as an example; adjust if your arch differs.
+    try:
+        # If you trained with an EfficientNet B2 feature extractor head:
+        model = models.efficientnet_b2(weights=None)  # no pretrained weights here
+        # Replace final classifier to match 6 classes (modify if yours differs)
+        in_features = model.classifier[1].in_features if hasattr(model, "classifier") else model.classifier.in_features
+        model.classifier[1] = torch.nn.Linear(in_features, 6)
+    except Exception:
+        # fallback simple model stub (safer than crash)
+        model = models.resnet18(weights=None)
+        model.fc = torch.nn.Linear(model.fc.in_features, 6)
 
-
-st.sidebar.markdown("### Options")
-show_probs = st.sidebar.checkbox("Show probabilities", value=True)
-st.sidebar.markdown("Model file: `model.pth` (place at repo root)")
-
-uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
-camera = st.camera_input("Or take a photo (mobile)")
-
-image_bytes = None
-if uploaded_file is not None:
-    image_bytes = uploaded_file.read()
-elif camera is not None:
-    image_bytes = camera.read()
-
-if image_bytes:
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    st.image(image, caption="Input image", use_column_width=True)
-    st.write("")
-    st.write("Detecting...")
-
-    # Preprocess
-    input_tensor = preprocess_image(image).unsqueeze(0).to(device)  # shape: [1, C, H, W]
-
+    try:
+        # try loading state_dict (most common)
+        state = torch.load(path, map_location=device)
+        if isinstance(state, dict) and not any(k.startswith("_") for k in state.keys()):
+            model.load_state_dict(state)
+        else:
+            # maybe saved whole model
+            model = state
+    except Exception as e:
+        st.error(f"Error loading model from {path}: {e}")
+    model.to(device)
     model.eval()
-    with torch.inference_mode():
-        outputs = model(input_tensor)  # raw logits or probabilities
+    return model, device
 
-        # Convert logits → probs if needed
-        if outputs.ndim == 1 or outputs.shape[1] == 1:
-            # single output or binary? treat as logits
-            probs = torch.sigmoid(outputs)
-            probs = probs.detach().cpu().numpy().squeeze()
-        else:
-            probs = F.softmax(outputs, dim=1).detach().cpu().numpy().squeeze()
+@st.cache_data
+def get_transforms():
+    # Use the same transforms you provided:
+    return transforms.Compose([
+        transforms.Resize(256, interpolation=transforms.InterpolationMode.BICUBIC),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225])
+    ])
 
-    # Get predicted class
-    if probs.ndim == 0:
-        # scalar
-        pred_idx = int(probs >= 0.5)
-    else:
-        pred_idx = int(probs.argmax())
+def predict_image(model, device, pil_img):
+    tf = get_transforms()
+    img_t = tf(pil_img).unsqueeze(0).to(device)  # 1 x C x H x W
+    with torch.no_grad():
+        out = model(img_t)
+        probs = F.softmax(out, dim=1).cpu().numpy()[0]
+        top_idx = int(probs.argmax())
+        return LABELS[top_idx], float(probs[top_idx]), probs
 
-    # Map label
-    label_text = labels.get(str(pred_idx), f"Class {pred_idx}")
+# UI
+st.title("🍎 Fruit Freshness Classifier")
+st.write("Upload an image of an apple, banana, or orange. The model predicts `fresh` or `rotten`.")
 
-    st.subheader(f"Prediction: **{label_text}**")
+uploaded = st.file_uploader("Choose an image...", type=["jpg","jpeg","png"])
+col1, col2 = st.columns([2,1])
 
-    if show_probs:
-        st.write("Confidence:")
-        if hasattr(probs, "tolist"):
-            probs_list = probs.tolist() if isinstance(probs, (list, tuple,)) or probs.ndim > 0 else [float(probs)]
-        else:
-            probs_list = [float(probs)]
+# Load model once
+with st.spinner("Loading model..."):
+    model, device = load_model(MODEL_PATH)
 
-        # If multi-class
-        if len(probs_list) > 1:
-            # show each class with probability (sorted)
-            pairs = [(int(i), float(p)) for i, p in enumerate(probs_list)]
-            pairs_sorted = sorted(pairs, key=lambda x: x[1], reverse=True)
-            for idx, p in pairs_sorted:
-                st.write(f"- {labels.get(str(idx), str(idx))}: {p*100:.2f}%")
-        else:
-            # binary/single value
-            st.write(f"- {label_text}: {probs_list[0]*100:.2f}%")
-
-    st.success("Done!")
-else:
-    st.info("Upload an image of apples / banana / oranges (fresh or rotten).")
+if uploaded:
+    img = Image.open(io.BytesIO(uploaded.read())).convert("RGB")
+    col1.image(img, caption="Input image", use_column_width=True)
+    if st.button("Predict"):
+        with st.spinner("Predicting..."):
+            label, prob, probs = predict_image(model, device, img)
+        st.success(f"Prediction: **{label}** — confidence: **{prob*100:.2f}%**")
+        # show class probabilities table
+        import pandas as pd
+        df = pd.DataFrame({
+            "class": [LABELS[i] for i in range(len(probs))],
+            "probability": [float(p) for p in probs]
+        }).sort_values("probability", ascending=False)
+        col2.table(df.reset_index(drop=True))
 
 st.markdown("---")
-st.markdown("**Mapping used** (id → label):")
-st.json(labels)
+st.caption("Note: The app expects `model.pth` in the same folder as `app.py` (or edit MODEL_PATH).")
