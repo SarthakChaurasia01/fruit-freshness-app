@@ -3,103 +3,112 @@ import streamlit as st
 from PIL import Image
 import io
 import torch
-import torch.nn.functional as F
-from torchvision import transforms, models
-import torchvision.transforms.functional as TF
+import torchvision.transforms as T
+from torchvision.transforms import InterpolationMode
+import numpy as np
 
-st.set_page_config(page_title="Fruit Freshness Classifier", layout="centered")
+# --------- CONFIG ---------
+MODEL_PATH = "model.pth"   # or change to a download path
+DEVICE = torch.device("cpu")
 
-# --- CLASSES / LABELS ---
-LABELS = {
+CLASS_MAP = {
     0: "freshapples",
     1: "freshbanana",
     2: "freshoranges",
     3: "rottenapples",
     4: "rottenbanana",
-    5: "rottenoranges"
+    5: "rottenoranges",
 }
 
-MODEL_PATH = "model.pth"  # make sure this file is in the repo / same folder as app.py
+# ImageTransform settings you gave:
+mean = [0.485, 0.456, 0.406]
+std = [0.229, 0.224, 0.225]
+resize_size = 256
+crop_size = 224
+interpolation = InterpolationMode.BICUBIC
 
-@st.cache_resource(show_spinner=False)
+transform = T.Compose([
+    T.Resize(resize_size, interpolation=interpolation),
+    T.CenterCrop(crop_size),
+    T.ToTensor(),
+    T.Normalize(mean=mean, std=std),
+])
+
+# --------- MODEL LOADING ---------
+@st.cache_resource(show_spinner=True)
 def load_model(path: str):
-    """
-    Load a torch model saved with torch.save(model.state_dict(), path) or torch.save(model, path).
-    This function tries state_dict load first (recommended).
-    """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # Build a model architecture matching your training model.
-    # Below uses EfficientNet_B2 from torchvision as an example; adjust if your arch differs.
+    # If you saved state_dict:
+    # from your_model_file import YourModelClass
+    # model = YourModelClass(num_classes=6)
+    # model.load_state_dict(torch.load(path, map_location="cpu"))
+    # model.eval()
+    #
+    # If you saved entire model (torch.save(model)), use torch.load directly.
     try:
-        # If you trained with an EfficientNet B2 feature extractor head:
-        model = models.efficientnet_b2(weights=None)  # no pretrained weights here
-        # Replace final classifier to match 6 classes (modify if yours differs)
-        in_features = model.classifier[1].in_features if hasattr(model, "classifier") else model.classifier.in_features
-        model.classifier[1] = torch.nn.Linear(in_features, 6)
-    except Exception:
-        # fallback simple model stub (safer than crash)
-        model = models.resnet18(weights=None)
-        model.fc = torch.nn.Linear(model.fc.in_features, 6)
-
-    try:
-        # try loading state_dict (most common)
-        state = torch.load(path, map_location=device)
-        if isinstance(state, dict) and not any(k.startswith("_") for k in state.keys()):
-            model.load_state_dict(state)
-        else:
-            # maybe saved whole model
-            model = state
+        # Try loading state_dict into a generic torch.nn.Module if user included architecture
+        checkpoint = torch.load(path, map_location="cpu")
+        # If checkpoint is a dict with 'state_dict', extract it
+        if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+            state_dict = checkpoint["state_dict"]
+            # You must have the model class available. Placeholder:
+            st.error("Model was saved with state_dict. Make sure to define model architecture in this file.")
+            return None
+        # If it's a whole model object (rare), return it
+        if isinstance(checkpoint, torch.nn.Module):
+            checkpoint.eval()
+            return checkpoint
+        # fallback: maybe this is a raw state_dict without wrapper
+        # We'll try to load it into a simple torchvision model for illustration (replace with your model).
+        st.error("Unable to auto-load model. See app README: you must define model architecture.")
+        return None
     except Exception as e:
-        st.error(f"Error loading model from {path}: {e}")
-    model.to(device)
+        st.error(f"Error loading model: {e}")
+        return None
+
+# If you have a custom model class, define/import it here and uncomment load logic above.
+
+# --------- PREDICTION UTILITIES ---------
+def predict_image(model, pil_image: Image.Image):
+    img = pil_image.convert("RGB")
+    x = transform(img).unsqueeze(0).to(DEVICE)
     model.eval()
-    return model, device
-
-@st.cache_data
-def get_transforms():
-    # Use the same transforms you provided:
-    return transforms.Compose([
-        transforms.Resize(256, interpolation=transforms.InterpolationMode.BICUBIC),
-        transforms.CenterCrop(224),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                             std=[0.229, 0.224, 0.225])
-    ])
-
-def predict_image(model, device, pil_img):
-    tf = get_transforms()
-    img_t = tf(pil_img).unsqueeze(0).to(device)  # 1 x C x H x W
     with torch.no_grad():
-        out = model(img_t)
-        probs = F.softmax(out, dim=1).cpu().numpy()[0]
-        top_idx = int(probs.argmax())
-        return LABELS[top_idx], float(probs[top_idx]), probs
+        out = model(x)
+        probs = torch.nn.functional.softmax(out, dim=1)
+        pred = int(probs.argmax(dim=1).item())
+        confidence = float(probs.max().item())
+    return CLASS_MAP[pred], confidence
 
-# UI
+# --------- STREAMLIT UI ---------
+st.set_page_config(page_title="Fruit Freshness Classifier", layout="centered")
 st.title("🍎 Fruit Freshness Classifier")
-st.write("Upload an image of an apple, banana, or orange. The model predicts `fresh` or `rotten`.")
 
-uploaded = st.file_uploader("Choose an image...", type=["jpg","jpeg","png"])
-col1, col2 = st.columns([2,1])
+st.markdown("Upload an image of *apples / bananas / oranges* and the model will predict fresh vs rotten.")
 
-# Load model once
-with st.spinner("Loading model..."):
-    model, device = load_model(MODEL_PATH)
+uploaded = st.file_uploader("Upload image", type=["png", "jpg", "jpeg"])
 
-if uploaded:
-    img = Image.open(io.BytesIO(uploaded.read())).convert("RGB")
-    col1.image(img, caption="Input image", use_column_width=True)
-    if st.button("Predict"):
-        with st.spinner("Predicting..."):
-            label, prob, probs = predict_image(model, device, img)
-        st.success(f"Prediction: **{label}** — confidence: **{prob*100:.2f}%**")
-        # show class probabilities table
-        import pandas as pd
-        df = pd.DataFrame({
-            "class": [LABELS[i] for i in range(len(probs))],
-            "probability": [float(p) for p in probs]
-        }).sort_values("probability", ascending=False)
-        col2.table(df.reset_index(drop=True))
+# Optionally, show a button to load the model only once
+if st.button("Load model"):
+    model = load_model(MODEL_PATH)
+    if model is not None:
+        st.success("Model loaded successfully.")
+    else:
+        st.warning("Model load returned None. Check logs / model file and architecture.")
 
-st.markdown("---")
-st.caption("Note: The app expects `model.pth` in the same folder as `app.py` (or edit MODEL_PATH).")
+# If a model is available in the environment cache, try to use it:
+# NOTE: you probably want to call load_model immediately for demo; adjust as needed.
+try:
+    model = load_model(MODEL_PATH)
+except Exception:
+    model = None
+
+if uploaded is not None:
+    img = Image.open(io.BytesIO(uploaded.read()))
+    st.image(img, caption="Input image", use_column_width=True)
+    if model is None:
+        st.warning("Model is not loaded. Click 'Load model' or check model path.")
+    else:
+        label, conf = predict_image(model, img)
+        st.success(f"Prediction: **{label}** (confidence {conf:.2%})")
+
+st.caption("Note: Make sure the model architecture in this file matches the saved weights/state_dict.")
