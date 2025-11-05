@@ -1,5 +1,0 @@
-__pycache__/
-*.pyc
-models/model.pth
-.env
-.vscode/
