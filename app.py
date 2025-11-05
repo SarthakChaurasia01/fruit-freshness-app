@@ -46,15 +46,80 @@ def load_labels():
 # ----------------------------
 @st.cache_resource
 def load_model():
+    """
+    Robust loader that tries several common .pth formats:
+      1) pure state_dict saved with torch.save(model.state_dict())
+      2) checkpoint dict with keys like 'model_state_dict' or 'state_dict'
+      3) a pickled nn.Module (if loading succeeds)
+    If loading fails due to UnpicklingError the function raises a helpful error.
+    """
     if not MODEL_PATH.exists():
         st.error(f"Model file not found at {MODEL_PATH}. Please check your folder structure.")
         st.stop()
-    model = models.efficientnet_b2(weights=None)
-    num_features = model.classifier[1].in_features
-    model.classifier[1] = nn.Linear(num_features, 6)  # 6 output classes
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=torch.device("cpu")))
-    model.eval()
-    return model
+
+    try:
+        loaded_obj = torch.load(MODEL_PATH, map_location=torch.device("cpu"))
+    except Exception as e:
+        # Catch pickling/unpickle errors and show user-friendly advice
+        st.error("Failed to load the model file with torch.load().")
+        st.error(f"Error: {e.__class__.__name__}: {str(e)}")
+        st.markdown(
+            """
+            **Likely causes / next steps**
+            - The `.pth` file was saved as a pickled `nn.Module` on a different Python/PyTorch version or used custom classes.
+            - If you have access to the training environment, re-save the model as a `state_dict`:
+              ```py
+              torch.save(model.state_dict(), "model_state_dict.pth")
+              ```
+              Or export as TorchScript:
+              ```py
+              scripted = torch.jit.trace(model, dummy_input)
+              scripted.save("model_scripted.pt")
+              ```
+            - Ensure the same PyTorch version is used on deployment as on training machine.
+            """
+        )
+        st.stop()
+
+    # If load returned a dict-like object, try to extract a state_dict
+    if isinstance(loaded_obj, dict):
+        # common keys in checkpoints
+        for key in ("model_state_dict", "state_dict", "model"):
+            if key in loaded_obj:
+                state_dict = loaded_obj[key]
+                break
+        else:
+            state_dict = loaded_obj  # maybe a plain state_dict
+
+        # instantiate architecture: best-effort with torchvision efficientnet_b2
+        try:
+            model = models.efficientnet_b2(weights=None)
+            # adapt classifier head — adjust output dim if needed
+            num_features = model.classifier[1].in_features
+            model.classifier[1] = nn.Linear(num_features, 6)
+        except Exception:
+            st.error("Failed to create EfficientNet-B2 architecture. If your training used a different EfficientNet implementation (timm or custom), you must instantiate the same model here.")
+            st.stop()
+
+        try:
+            model.load_state_dict(state_dict, strict=False)
+            model.eval()
+            return model
+        except Exception as e:
+            st.error("Loaded object looks like a state-dict but failed to load into the torchvision EfficientNet-B2 architecture.")
+            st.error(f"load_state_dict error: {e}")
+            st.markdown("If you used a different model or custom head when training, recreate the exact architecture here before loading.")
+            st.stop()
+
+    # If load returned an nn.Module (the whole model was pickled)
+    if isinstance(loaded_obj, nn.Module):
+        loaded_obj.eval()
+        return loaded_obj
+
+    # Unknown format
+    st.error("The loaded .pth file has an unrecognized format. It is not a dict-like state_dict nor a pickled nn.Module.")
+    st.stop()
+
 
 # ----------------------------
 # Image Preprocessing
