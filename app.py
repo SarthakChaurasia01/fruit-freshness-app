@@ -18,7 +18,7 @@ st.write("Upload an image of a fruit to check whether it's **Fresh** or **Rotten
 # ----------------------------
 # Paths
 # ----------------------------
-MODEL_PATH = Path("model/model.pth")
+MODEL_PATH = Path("models/model.pth")
 LABELS_PATH = Path("labels.json")
 
 # ----------------------------
