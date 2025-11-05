@@ -1,62 +1,80 @@
-# app.py
 import streamlit as st
+import torch
+import torch.nn as nn
+import torchvision.transforms as transforms
+from torchvision import models
 from PIL import Image
-import io
-import os
 import json
+import io
 
-from utils import get_transforms, load_labels, build_model, predict_image
+# ----------------------------
+# Page config
+# ----------------------------
+st.set_page_config(page_title="🍎 Fresh or Rotten Fruit Classifier", layout="centered")
+st.title("🍎 Fresh vs Rotten Fruit Classifier")
+st.write("Upload an image of a fruit to check whether it's **Fresh** or **Rotten**.")
 
-st.set_page_config(page_title="Fruit Freshness Classifier", layout="centered")
+# ----------------------------
+# Load labels
+# ----------------------------
+@st.cache_resource
+def load_labels():
+    with open("labels.json", "r") as f:
+        labels = json.load(f)
+    return labels
 
-st.title("🍎 Fruit Freshness Classifier (EfficientNet-B2)")
-st.markdown("Upload an image of an apple / banana / orange — the model predicts fresh vs rotten.")
+# ----------------------------
+# Load model
+# ----------------------------
+@st.cache_resource
+def load_model():
+    model = models.efficientnet_b2(weights=None)
+    num_features = model.classifier[1].in_features
+    model.classifier[1] = nn.Linear(num_features, 6)  # 6 classes
+    model.load_state_dict(torch.load("model.pth", map_location=torch.device("cpu")))
+    model.eval()
+    return model
 
-# Sidebar
-st.sidebar.header("Model")
-model_path = st.sidebar.text_input("Model path", value="models/model.pth")
-labels_path = st.sidebar.text_input("Labels JSON", value="labels.json")
-top_k = st.sidebar.slider("Top K predictions", 1, 6, 3)
+# ----------------------------
+# Image Preprocessing
+# ----------------------------
+def transform_image(image):
+    transform = transforms.Compose([
+        transforms.Resize((260, 260)),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406],
+                             [0.229, 0.224, 0.225])
+    ])
+    return transform(image).unsqueeze(0)
 
-# Load labels and model once (cache)
-@st.cache_resource(show_spinner=False)
-def load_resources(model_path, labels_path):
-    labels = load_labels(labels_path)
-    model, device = build_model(num_classes=len(labels), checkpoint_path=model_path)
-    transforms = get_transforms()
-    return labels, model, device, transforms
+# ----------------------------
+# Prediction function
+# ----------------------------
+def predict(model, image_tensor, labels):
+    with torch.no_grad():
+        outputs = model(image_tensor)
+        probs = torch.softmax(outputs, dim=1)
+        top_prob, top_class = probs.topk(1, dim=1)
+        pred_label = labels[str(top_class.item())]
+        return pred_label, float(top_prob.item()), probs.squeeze().tolist()
 
-try:
-    labels, model, device, transforms = load_resources(model_path, labels_path)
-except Exception as e:
-    st.error(f"Error loading model or labels: {e}")
-    st.stop()
+# ----------------------------
+# App Interface
+# ----------------------------
+labels = load_labels()
+model = load_model()
 
-uploaded = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg"])
-if uploaded:
-    try:
-        img = Image.open(io.BytesIO(uploaded.read())).convert("RGB")
-    except Exception as e:
-        st.error("Invalid image uploaded.")
-        st.stop()
+uploaded_file = st.file_uploader("📤 Upload a fruit image", type=["jpg", "jpeg", "png"])
 
-    st.image(img, caption="Input image", use_column_width=True)
+if uploaded_file is not None:
+    image = Image.open(io.BytesIO(uploaded_file.read())).convert("RGB")
+    st.image(image, caption="Uploaded Image", use_column_width=True)
 
-    if st.button("Predict"):
-        with st.spinner("Predicting..."):
-            try:
-                results = predict_image(model, device, img, transforms, labels, topk=top_k)
-            except Exception as e:
-                st.error(f"Prediction error: {e}")
-                st.stop()
+    if st.button("🔍 Predict"):
+        with st.spinner("Classifying..."):
+            tensor = transform_image(image)
+            label, prob, all_probs = predict(model, tensor, labels)
+            st.success(f"✅ Prediction: **{label}** ({prob*100:.2f}% confidence)")
 
-        st.subheader("Top predictions")
-        for label, prob in results:
-            st.write(f"**{label}** — {prob*100:.2f}%")
-else:
-    st.info("Upload an image to get a prediction.")
-
-st.write("---")
-st.write("Model info:")
-st.write(f"- Device: `{device}`")
-st.write(f"- Classes: {json.dumps(labels, indent=2)}")
+            if st.checkbox("Show all class probabilities"):
+                st.json({labels[str(i)]: round(p*100, 2) for i, p in enumerate(all_probs)})
