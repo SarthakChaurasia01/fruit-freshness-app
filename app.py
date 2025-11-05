@@ -6,32 +6,53 @@ from torchvision import models
 from PIL import Image
 import json
 import io
+from pathlib import Path
 
 # ----------------------------
-# Page config
+# Page Config
 # ----------------------------
 st.set_page_config(page_title="🍎 Fresh or Rotten Fruit Classifier", layout="centered")
 st.title("🍎 Fresh vs Rotten Fruit Classifier")
 st.write("Upload an image of a fruit to check whether it's **Fresh** or **Rotten**.")
 
 # ----------------------------
+# Paths
+# ----------------------------
+MODEL_PATH = Path("model/model.pth")
+LABELS_PATH = Path("labels.json")
+
+# ----------------------------
 # Load labels
 # ----------------------------
 @st.cache_resource
 def load_labels():
-    with open("labels.json", "r") as f:
-        labels = json.load(f)
-    return labels
+    if LABELS_PATH.exists():
+        with open(LABELS_PATH, "r") as f:
+            labels = json.load(f)
+        return labels
+    else:
+        st.warning("⚠️ labels.json not found. Using default labels.")
+        return {
+            "0": "freshapples",
+            "1": "freshbanana",
+            "2": "freshoranges",
+            "3": "rottenapples",
+            "4": "rottenbanana",
+            "5": "rottenoranges"
+        }
 
 # ----------------------------
 # Load model
 # ----------------------------
 @st.cache_resource
 def load_model():
+    if not MODEL_PATH.exists():
+        st.error(f"Model file not found at {MODEL_PATH}. Please check your folder structure.")
+        st.stop()
     model = models.efficientnet_b2(weights=None)
     num_features = model.classifier[1].in_features
-    model.classifier[1] = nn.Linear(num_features, 6)  # 6 classes
-    model.load_state_dict(torch.load("model.pth", map_location=torch.device("cpu")))
+    model.classifier[1] = nn.Linear(num_features, 6)  # 6 output classes
+    model.load_state_dict(torch.load(MODEL_PATH, map_location=torch.device("cpu")))
     model.eval()
     return model
 
